@@ -2,7 +2,8 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>Three.jsとMediaPipe Handsの例</title>
+  <title>Three.jsとMediaPipe Handsのモバイル対応例</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <style>
     body, html {
       margin: 0;
@@ -85,7 +86,7 @@
         try {
           scene = new THREE.Scene();
           camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-          renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+          renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
           renderer.setSize(window.innerWidth, window.innerHeight);
 
           createSphere();
@@ -351,14 +352,30 @@
             });
             hands.onResults(onResults);
 
-            const cameraUtils = new Camera(videoElement, {
-              onFrame: async () => {
-                await hands.send({ image: videoElement });
-              },
-              width: 1280,
-              height: 720,
+            // カメラの設定をモバイルデバイスに合わせて調整
+            const constraints = {
+              video: {
+                facingMode: 'user', // フロントカメラを使用
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+              }
+            };
+
+            navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+              videoElement.srcObject = stream;
+              videoElement.play();
+
+              const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                  await hands.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480,
+              });
+              cameraUtils.start();
+            }).catch((err) => {
+              handleError(new Error(`カメラへのアクセスが拒否されました: ${err.message}`));
             });
-            cameraUtils.start();
           } catch (err) {
             handleError(new Error(`手の追跡の初期化に失敗しました: ${err.message}`));
           }
