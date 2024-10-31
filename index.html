@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>Three.jsとMediaPipe Handsのモバイル対応例</title>
+  <title>Three.jsとMediaPipe Handsの改良版</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <style>
     body, html {
@@ -73,6 +73,11 @@
       let handVelocity = new THREE.Vector3();
 
       let mediaPipeHands = null;
+
+      // 手の位置とピンチ距離の履歴を保持するための配列
+      const handPositionHistory = [];
+      const pinchDistanceHistory = [];
+      const maxHistoryLength = 5; // 履歴の長さ
 
       function handleError(err) {
         console.error('エラーが発生しました:', err);
@@ -345,9 +350,9 @@
             });
             hands.setOptions({
               maxNumHands: 1,
-              modelComplexity: 1,
-              minDetectionConfidence: 0.7,
-              minTrackingConfidence: 0.7,
+              modelComplexity: 2, // 複雑なモデルを使用
+              minDetectionConfidence: 0.8, // 信頼度を上げる
+              minTrackingConfidence: 0.8,
               selfieMode: true,
             });
             hands.onResults(onResults);
@@ -389,40 +394,73 @@
           const indexFingerTip = landmarks[8];
           const thumbTip = landmarks[4];
 
-          // 手の位置をスムーズに計算
-          const targetHandPosition = new THREE.Vector3(
+          // 手の位置を計算
+          const rawHandPosition = new THREE.Vector3(
             (indexFingerTip.x - 0.5) * 10,
             (indexFingerTip.y - 0.5) * -10,
             -indexFingerTip.z * 10
           );
 
+          // 手の位置の履歴を更新
+          handPositionHistory.push(rawHandPosition.clone());
+          if (handPositionHistory.length > maxHistoryLength) {
+            handPositionHistory.shift();
+          }
+
+          // 手の位置を平滑化
+          const smoothedHandPosition = new THREE.Vector3();
+          handPositionHistory.forEach(pos => smoothedHandPosition.add(pos));
+          smoothedHandPosition.divideScalar(handPositionHistory.length);
+
           // 手の速度を計算してスムーズな動きを実現
-          handVelocity.subVectors(targetHandPosition, lastHandPosition).multiplyScalar(0.2);
-          lastHandPosition.copy(targetHandPosition);
+          handVelocity.subVectors(smoothedHandPosition, lastHandPosition).multiplyScalar(0.2);
+          lastHandPosition.copy(smoothedHandPosition);
 
           // 手の可視化を更新
-          handMesh.position.copy(targetHandPosition);
+          handMesh.position.copy(smoothedHandPosition);
 
-          // ピンチ検出を強化
+          // ピンチ距離の計算
           const pinchDistance = calculateDistance(thumbTip, indexFingerTip);
-          const isPinchingNow = pinchDistance < 0.025; // 調整した閾値
 
+          // ピンチ距離の履歴を更新
+          pinchDistanceHistory.push(pinchDistance);
+          if (pinchDistanceHistory.length > maxHistoryLength) {
+            pinchDistanceHistory.shift();
+          }
+
+          // ピンチ距離を平滑化
+          const smoothedPinchDistance = pinchDistanceHistory.reduce((a, b) => a + b, 0) / pinchDistanceHistory.length;
+
+          // ピンチ状態を更新
+          const pinchThreshold = 0.025; // 閾値
+          const isPinchingNow = smoothedPinchDistance < pinchThreshold;
+
+          // ピンチ状態の変化を検出
           if (isPinchingNow && !isPinching) {
-            onPinchStart(targetHandPosition);
+            onPinchStart(smoothedHandPosition);
           } else if (!isPinchingNow && isPinching) {
             onPinchEnd();
           }
 
           if (isPinching) {
-            onPinchMove(targetHandPosition);
+            onPinchMove(smoothedHandPosition);
           }
 
           // ワープパーティクルとの相互作用
           if (isWarping) {
-            const distanceToCenter = targetHandPosition.length();
+            const distanceToCenter = smoothedHandPosition.length();
             if (distanceToCenter < 5) {
-              warpParticles.rotation.x += targetHandPosition.y * -0.01;
-              warpParticles.rotation.y += targetHandPosition.x * 0.01;
+              warpParticles.rotation.x += smoothedHandPosition.y * -0.01;
+              warpParticles.rotation.y += smoothedHandPosition.x * 0.01;
+            }
+          }
+        } else {
+          // 手が検出されない場合、過去の手の位置を保持
+          if (handPositionHistory.length > 0) {
+            const lastPosition = handPositionHistory[handPositionHistory.length - 1];
+            handPositionHistory.push(lastPosition);
+            if (handPositionHistory.length > maxHistoryLength) {
+              handPositionHistory.shift();
             }
           }
         }
@@ -433,3 +471,4 @@
   </script>
 </body>
 </html>
+
