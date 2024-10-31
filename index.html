@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Three.jsとMediaPipe Handsの例</title>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: black;
+    }
+    #startButton {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background-color: #3498db;
+      color: white;
+      font-size: 20px;
+      padding: 15px 30px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    #error {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: red;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 5px;
+    }
+    #videoElement {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <button id="startButton">Start Experience</button>
+  <canvas id="canvas"></canvas>
+  <video id="videoElement"></video>
+  <div id="error"></div>
+
+  <!-- 必要なスクリプトを読み込み -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.2/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const canvas = document.getElementById('canvas');
+      const videoElement = document.getElementById('videoElement');
+      const startButton = document.getElementById('startButton');
+      const errorDiv = document.getElementById('error');
+
+      let isStarted = false;
+      let error = null;
+
+      let scene, camera, renderer;
+      let sphere, particles, warpParticles;
+      let handMesh, pinchIndicator;
+      let isPinching = false;
+      let pinchStartPosition = new THREE.Vector3();
+      let originalScale = new THREE.Vector3(1, 1, 1);
+      const wallZ = -20;
+      let isWarping = false;
+      let lastHandPosition = new THREE.Vector3();
+      let handVelocity = new THREE.Vector3();
+
+      let mediaPipeHands = null;
+
+      function handleError(err) {
+        console.error('エラーが発生しました:', err);
+        error = err.message;
+        if (errorDiv) {
+          errorDiv.textContent = error;
+        }
+      }
+
+      function init() {
+        try {
+          scene = new THREE.Scene();
+          camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+          renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+          renderer.setSize(window.innerWidth, window.innerHeight);
+
+          createSphere();
+          createWall();
+          createParticles();
+          createWarpParticles();
+          createHandMesh();
+          createPinchIndicator();
+
+          camera.position.z = 5;
+
+          window.addEventListener('resize', onWindowResize, false);
+
+          animate();
+        } catch (err) {
+          handleError(err);
+        }
+      }
+
+      function createSphere() {
+        const geometry = new THREE.SphereGeometry(1, 64, 64);
+        const material = new THREE.MeshPhongMaterial({
+          color: 0x3498db,
+          specular: 0x333333,
+          shininess: 100,
+        });
+        sphere = new THREE.Mesh(geometry, material);
+        scene.add(sphere);
+
+        const light = new THREE.PointLight(0xffffff, 1, 100);
+        light.position.set(10, 10, 10);
+        scene.add(light);
+      }
+
+      function createWall() {
+        const wallGeometry = new THREE.PlaneGeometry(40, 40);
+        const wallMaterial = new THREE.MeshBasicMaterial({ color: 0x222222, side: THREE.DoubleSide });
+        const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+        wall.position.z = wallZ;
+        scene.add(wall);
+      }
+
+      function createParticles() {
+        const particleCount = 1000;
+        const particleGeometry = new THREE.BufferGeometry();
+        const particlePositions = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount * 3; i++) {
+          particlePositions[i] = (Math.random() - 0.5) * 10;
+        }
+
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+        const particleMaterial = new THREE.PointsMaterial({
+          color: 0x3498db,
+          size: 0.05,
+          blending: THREE.AdditiveBlending,
+          transparent: true,
+          opacity: 0.8
+        });
+
+        particles = new THREE.Points(particleGeometry, particleMaterial);
+        particles.visible = false;
+        scene.add(particles);
+      }
+
+      function createWarpParticles() {
+        const particleCount = 10000;
+        const particleGeometry = new THREE.BufferGeometry();
+        const particlePositions = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount * 3; i += 3) {
+          const r = 50 + Math.random() * 100;
+          const theta = Math.random() * Math.PI * 2;
+          const phi = Math.random() * Math.PI;
+
+          particlePositions[i] = r * Math.sin(phi) * Math.cos(theta);
+          particlePositions[i + 1] = r * Math.sin(phi) * Math.sin(theta);
+          particlePositions[i + 2] = r * Math.cos(phi);
+        }
+
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+        const particleMaterial = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: 0.1,
+          blending: THREE.AdditiveBlending,
+          transparent: true,
+          opacity: 0
+        });
+
+        warpParticles = new THREE.Points(particleGeometry, particleMaterial);
+        scene.add(warpParticles);
+      }
+
+      function createHandMesh() {
+        const geometry = new THREE.SphereGeometry(0.1, 32, 32);
+        const material = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.7 });
+        handMesh = new THREE.Mesh(geometry, material);
+        scene.add(handMesh);
+      }
+
+      function createPinchIndicator() {
+        const geometry = new THREE.RingGeometry(0.05, 0.07, 32);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+        pinchIndicator = new THREE.Mesh(geometry, material);
+        pinchIndicator.visible = false;
+        scene.add(pinchIndicator);
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+
+        if (isWarping) {
+          warpParticles.rotation.y += 0.01;
+        }
+
+        // 手の移動をスムーズにする
+        if (handMesh) {
+          handMesh.position.add(handVelocity);
+          handVelocity.multiplyScalar(0.9); // 減衰係数
+        }
+      }
+
+      function onPinchStart(position) {
+        isPinching = true;
+        pinchStartPosition.copy(position);
+        originalScale.copy(sphere.scale);
+        pinchIndicator.visible = true;
+        pinchIndicator.position.copy(position);
+      }
+
+      function onPinchMove(position) {
+        if (isPinching) {
+          const dragVector = new THREE.Vector3().subVectors(position, pinchStartPosition);
+          const dragDistance = dragVector.length();
+
+          sphere.scale.set(
+            originalScale.x - dragDistance * 0.1,
+            originalScale.y - dragDistance * 0.1,
+            originalScale.z + dragDistance * 0.5
+          );
+          sphere.position.copy(pinchStartPosition).add(dragVector.multiplyScalar(0.5));
+
+          // 引っ張る感覚を強化
+          const elasticForce = dragVector.clone().multiplyScalar(-0.1);
+          sphere.position.add(elasticForce);
+
+          pinchIndicator.position.copy(position);
+        }
+      }
+
+      function onPinchEnd() {
+        if (isPinching) {
+          isPinching = false;
+          pinchIndicator.visible = false;
+          const velocity = new THREE.Vector3().subVectors(sphere.position, pinchStartPosition);
+          launchSphere(velocity);
+        }
+      }
+
+      function launchSphere(velocity) {
+        gsap.to(sphere.position, {
+          x: 0,
+          y: 0,
+          z: wallZ,
+          duration: 1,
+          ease: "power1.in",
+          onComplete: onSphereCollision
+        });
+
+        gsap.to(sphere.scale, {
+          x: originalScale.x,
+          y: originalScale.y,
+          z: originalScale.z,
+          duration: 0.5
+        });
+      }
+
+      function onSphereCollision() {
+        sphere.visible = false;
+        particles.visible = true;
+        particles.position.copy(sphere.position);
+
+        gsap.to(particles.material, {
+          opacity: 1,
+          duration: 0.2,
+          onComplete: startWarpEffect
+        });
+
+        const particlePositions = particles.geometry.attributes.position.array;
+        for (let i = 0; i < particlePositions.length; i += 3) {
+          gsap.to(particlePositions, {
+            [i]: particlePositions[i] + (Math.random() - 0.5) * 20,
+            [i + 1]: particlePositions[i + 1] + (Math.random() - 0.5) * 20,
+            [i + 2]: particlePositions[i + 2] + (Math.random() - 0.5) * 20,
+            duration: 1,
+            ease: "power2.out"
+          });
+        }
+        particles.geometry.attributes.position.needsUpdate = true;
+      }
+
+      function startWarpEffect() {
+        isWarping = true;
+        gsap.to(warpParticles.material, {
+          opacity: 0.5,
+          duration: 2,
+          ease: "power1.in"
+        });
+
+        gsap.to(camera.position, {
+          z: 1000,
+          duration: 5,
+          ease: "power2.in"
+        });
+
+        gsap.to(warpParticles.rotation, {
+          x: Math.PI * 2,
+          y: Math.PI * 2,
+          duration: 5,
+          ease: "power2.in",
+          onComplete: () => {
+            console.log("時空間移動完了！");
+            isWarping = false;
+          }
+        });
+      }
+
+      function onWindowResize() {
+        if (camera && renderer) {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+      }
+
+      function calculateDistance(a, b) {
+        return Math.sqrt(
+          Math.pow(a.x - b.x, 2) +
+          Math.pow(a.y - b.y, 2) +
+          Math.pow(a.z - b.z, 2)
+        );
+      }
+
+      function handleStart() {
+        isStarted = true;
+        startButton.style.display = 'none';
+        init();
+
+        if (videoElement) {
+          try {
+            const hands = new Hands({
+              locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+              },
+            });
+            hands.setOptions({
+              maxNumHands: 1,
+              modelComplexity: 1,
+              minDetectionConfidence: 0.7,
+              minTrackingConfidence: 0.7,
+              selfieMode: true,
+            });
+            hands.onResults(onResults);
+
+            const cameraUtils = new Camera(videoElement, {
+              onFrame: async () => {
+                await hands.send({ image: videoElement });
+              },
+              width: 1280,
+              height: 720,
+            });
+            cameraUtils.start();
+          } catch (err) {
+            handleError(new Error(`手の追跡の初期化に失敗しました: ${err.message}`));
+          }
+        }
+      }
+
+      function onResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          const landmarks = results.multiHandLandmarks[0];
+
+          const indexFingerTip = landmarks[8];
+          const thumbTip = landmarks[4];
+
+          // 手の位置をスムーズに計算
+          const targetHandPosition = new THREE.Vector3(
+            (indexFingerTip.x - 0.5) * 10,
+            (indexFingerTip.y - 0.5) * -10,
+            -indexFingerTip.z * 10
+          );
+
+          // 手の速度を計算してスムーズな動きを実現
+          handVelocity.subVectors(targetHandPosition, lastHandPosition).multiplyScalar(0.2);
+          lastHandPosition.copy(targetHandPosition);
+
+          // 手の可視化を更新
+          handMesh.position.copy(targetHandPosition);
+
+          // ピンチ検出を強化
+          const pinchDistance = calculateDistance(thumbTip, indexFingerTip);
+          const isPinchingNow = pinchDistance < 0.025; // 調整した閾値
+
+          if (isPinchingNow && !isPinching) {
+            onPinchStart(targetHandPosition);
+          } else if (!isPinchingNow && isPinching) {
+            onPinchEnd();
+          }
+
+          if (isPinching) {
+            onPinchMove(targetHandPosition);
+          }
+
+          // ワープパーティクルとの相互作用
+          if (isWarping) {
+            const distanceToCenter = targetHandPosition.length();
+            if (distanceToCenter < 5) {
+              warpParticles.rotation.x += targetHandPosition.y * -0.01;
+              warpParticles.rotation.y += targetHandPosition.x * 0.01;
+            }
+          }
+        }
+      }
+
+      startButton.addEventListener('click', handleStart);
+    });
+  </script>
+</body>
+</html>
