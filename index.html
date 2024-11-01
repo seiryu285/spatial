@@ -1,69 +1,118 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Three.jsとMediaPipe Handsの改良版</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Hand Gesture 3D Interaction</title>
   <style>
     body, html {
       margin: 0;
       padding: 0;
       overflow: hidden;
-      background-color: black;
+      background-color: #000;
+      width: 100%;
+      height: 100%;
     }
-    #startButton {
+    #start-button {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background-color: #3498db;
-      color: white;
-      font-size: 20px;
       padding: 15px 30px;
+      background-color: #3498db;
+      color: #fff;
       border: none;
-      border-radius: 5px;
+      border-radius: 8px;
+      font-size: 18px;
       cursor: pointer;
+      transition: background-color 0.3s;
+      z-index: 10;
     }
-    #error {
+    #start-button:hover {
+      background-color: #2980b9;
+    }
+    #error-message {
       position: absolute;
       top: 20px;
       left: 50%;
       transform: translateX(-50%);
-      background-color: red;
-      color: white;
+      background-color: rgba(255, 0, 0, 0.8);
+      color: #fff;
       padding: 10px 20px;
       border-radius: 5px;
+      z-index: 10;
     }
-    #videoElement {
+    canvas {
+      display: block;
+    }
+    video {
       display: none;
     }
   </style>
 </head>
 <body>
-  <button id="startButton">Start Experience</button>
-  <canvas id="canvas"></canvas>
-  <video id="videoElement"></video>
-  <div id="error"></div>
+  <button id="start-button">Start Experience</button>
+  <div id="error-message" style="display: none;"></div>
+  <canvas id="three-canvas"></canvas>
+  <video id="video-element" playsinline></video>
 
-  <!-- 必要なスクリプトを読み込み -->
-  <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.2/dist/gsap.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+  <!-- Include necessary libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.11.5/gsap.min.js"></script>
 
   <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      const canvas = document.getElementById('canvas');
-      const videoElement = document.getElementById('videoElement');
-      const startButton = document.getElementById('startButton');
-      const errorDiv = document.getElementById('error');
+    // Utility function to calculate distance between two points
+    function calculateDistance(a, b) {
+      return Math.sqrt(
+        Math.pow(a.x - b.x, 2) +
+        Math.pow(a.y - b.y, 2) +
+        Math.pow(a.z - b.z, 2)
+      );
+    }
+
+    class MediaPipeHands {
+      constructor(videoElement, onResultsCallback) {
+        this.hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        this.hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.7,
+          minTrackingConfidence: 0.7,
+          selfieMode: true,
+        });
+        this.hands.onResults(onResultsCallback);
+
+        this.camera = new Camera(videoElement, {
+          onFrame: async () => {
+            await this.hands.send({ image: videoElement });
+          },
+          width: 1280,
+          height: 720,
+        });
+      }
+
+      start() {
+        if (this.camera) this.camera.start();
+      }
+
+      stop() {
+        if (this.camera) this.camera.stop();
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.getElementById('three-canvas');
+      const video = document.getElementById('video-element');
+      const startButton = document.getElementById('start-button');
+      const errorMessage = document.getElementById('error-message');
 
       let isStarted = false;
-      let error = null;
+      let mediaPipeHands = null;
 
+      // Three.js variables
       let scene, camera, renderer;
-      let sphere, particles, warpParticles;
-      let handMesh, pinchIndicator;
+      let sphere, particles, warpParticles, handMesh, pinchIndicator;
       let isPinching = false;
       let pinchStartPosition = new THREE.Vector3();
       let originalScale = new THREE.Vector3(1, 1, 1);
@@ -72,43 +121,25 @@
       let lastHandPosition = new THREE.Vector3();
       let handVelocity = new THREE.Vector3();
 
-      let mediaPipeHands = null;
+      // Initialize Three.js scene
+      function initThreeJS() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
 
-      // 手の位置とピンチ距離の履歴を保持するための配列
-      const handPositionHistory = [];
-      const pinchDistanceHistory = [];
-      const maxHistoryLength = 5; // 履歴の長さ
+        createSphere();
+        createWall();
+        createParticles();
+        createWarpParticles();
+        createHandMesh();
+        createPinchIndicator();
 
-      function handleError(err) {
-        console.error('エラーが発生しました:', err);
-        error = err.message;
-        if (errorDiv) {
-          errorDiv.textContent = error;
-        }
-      }
+        camera.position.z = 5;
 
-      function init() {
-        try {
-          scene = new THREE.Scene();
-          camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-          renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
-          renderer.setSize(window.innerWidth, window.innerHeight);
+        window.addEventListener('resize', onWindowResize, false);
 
-          createSphere();
-          createWall();
-          createParticles();
-          createWarpParticles();
-          createHandMesh();
-          createPinchIndicator();
-
-          camera.position.z = 5;
-
-          window.addEventListener('resize', onWindowResize, false);
-
-          animate();
-        } catch (err) {
-          handleError(err);
-        }
+        animate();
       }
 
       function createSphere() {
@@ -208,10 +239,10 @@
           warpParticles.rotation.y += 0.01;
         }
 
-        // 手の移動をスムーズにする
+        // Apply hand velocity to smooth out hand movement
         if (handMesh) {
           handMesh.position.add(handVelocity);
-          handVelocity.multiplyScalar(0.9); // 減衰係数
+          handVelocity.multiplyScalar(0.9); // Damping factor
         }
       }
 
@@ -235,7 +266,7 @@
           );
           sphere.position.copy(pinchStartPosition).add(dragVector.multiplyScalar(0.5));
 
-          // 引っ張る感覚を強化
+          // Enhanced pulling sensation
           const elasticForce = dragVector.clone().multiplyScalar(-0.1);
           sphere.position.add(elasticForce);
 
@@ -328,147 +359,91 @@
         }
       }
 
-      function calculateDistance(a, b) {
-        return Math.sqrt(
-          Math.pow(a.x - b.x, 2) +
-          Math.pow(a.y - b.y, 2) +
-          Math.pow(a.z - b.z, 2)
-        );
-      }
-
-      function handleStart() {
-        isStarted = true;
-        startButton.style.display = 'none';
-        init();
-
-        if (videoElement) {
-          try {
-            const hands = new Hands({
-              locateFile: (file) => {
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-              },
-            });
-            hands.setOptions({
-              maxNumHands: 1,
-              modelComplexity: 2, // 複雑なモデルを使用
-              minDetectionConfidence: 0.8, // 信頼度を上げる
-              minTrackingConfidence: 0.8,
-              selfieMode: true,
-            });
-            hands.onResults(onResults);
-
-            // カメラの設定をモバイルデバイスに合わせて調整
-            const constraints = {
-              video: {
-                facingMode: 'user', // フロントカメラを使用
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-              }
-            };
-
-            navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
-              videoElement.srcObject = stream;
-              videoElement.play();
-
-              const cameraUtils = new Camera(videoElement, {
-                onFrame: async () => {
-                  await hands.send({ image: videoElement });
-                },
-                width: 640,
-                height: 480,
-              });
-              cameraUtils.start();
-            }).catch((err) => {
-              handleError(new Error(`カメラへのアクセスが拒否されました: ${err.message}`));
-            });
-          } catch (err) {
-            handleError(new Error(`手の追跡の初期化に失敗しました: ${err.message}`));
-          }
-        }
+      // Enhanced gesture recognition logic
+      function initializeMediaPipe() {
+        mediaPipeHands = new MediaPipeHands(video, onResults);
+        mediaPipeHands.start();
       }
 
       function onResults(results) {
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
           const landmarks = results.multiHandLandmarks[0];
-
+          
           const indexFingerTip = landmarks[8];
           const thumbTip = landmarks[4];
 
-          // 手の位置を計算
-          const rawHandPosition = new THREE.Vector3(
+          // Improved hand position calculation with scaling and offset
+          const targetHandPosition = new THREE.Vector3(
             (indexFingerTip.x - 0.5) * 10,
             (indexFingerTip.y - 0.5) * -10,
             -indexFingerTip.z * 10
           );
 
-          // 手の位置の履歴を更新
-          handPositionHistory.push(rawHandPosition.clone());
-          if (handPositionHistory.length > maxHistoryLength) {
-            handPositionHistory.shift();
-          }
+          // Calculate hand velocity for smoother movement
+          handVelocity.subVectors(targetHandPosition, lastHandPosition).multiplyScalar(0.2);
+          lastHandPosition.copy(targetHandPosition);
 
-          // 手の位置を平滑化
-          const smoothedHandPosition = new THREE.Vector3();
-          handPositionHistory.forEach(pos => smoothedHandPosition.add(pos));
-          smoothedHandPosition.divideScalar(handPositionHistory.length);
+          // Update hand visualization
+          handMesh.position.copy(targetHandPosition);
 
-          // 手の速度を計算してスムーズな動きを実現
-          handVelocity.subVectors(smoothedHandPosition, lastHandPosition).multiplyScalar(0.2);
-          lastHandPosition.copy(smoothedHandPosition);
-
-          // 手の可視化を更新
-          handMesh.position.copy(smoothedHandPosition);
-
-          // ピンチ距離の計算
+          // Enhanced pinch detection with hysteresis
           const pinchDistance = calculateDistance(thumbTip, indexFingerTip);
+          const pinchThreshold = 0.025; // Adjusted threshold
+          const pinchReleaseThreshold = 0.03; // Hysteresis to prevent flickering
 
-          // ピンチ距離の履歴を更新
-          pinchDistanceHistory.push(pinchDistance);
-          if (pinchDistanceHistory.length > maxHistoryLength) {
-            pinchDistanceHistory.shift();
-          }
-
-          // ピンチ距離を平滑化
-          const smoothedPinchDistance = pinchDistanceHistory.reduce((a, b) => a + b, 0) / pinchDistanceHistory.length;
-
-          // ピンチ状態を更新
-          const pinchThreshold = 0.025; // 閾値
-          const isPinchingNow = smoothedPinchDistance < pinchThreshold;
-
-          // ピンチ状態の変化を検出
-          if (isPinchingNow && !isPinching) {
-            onPinchStart(smoothedHandPosition);
-          } else if (!isPinchingNow && isPinching) {
+          if (pinchDistance < pinchThreshold && !isPinching) {
+            onPinchStart(targetHandPosition);
+          } else if (pinchDistance > pinchReleaseThreshold && isPinching) {
             onPinchEnd();
           }
 
           if (isPinching) {
-            onPinchMove(smoothedHandPosition);
+            onPinchMove(targetHandPosition);
           }
 
-          // ワープパーティクルとの相互作用
+          // Interaction with warp particles
           if (isWarping) {
-            const distanceToCenter = smoothedHandPosition.length();
+            const distanceToCenter = targetHandPosition.length();
             if (distanceToCenter < 5) {
-              warpParticles.rotation.x += smoothedHandPosition.y * -0.01;
-              warpParticles.rotation.y += smoothedHandPosition.x * 0.01;
-            }
-          }
-        } else {
-          // 手が検出されない場合、過去の手の位置を保持
-          if (handPositionHistory.length > 0) {
-            const lastPosition = handPositionHistory[handPositionHistory.length - 1];
-            handPositionHistory.push(lastPosition);
-            if (handPositionHistory.length > maxHistoryLength) {
-              handPositionHistory.shift();
+              warpParticles.rotation.x += targetHandPosition.y * -0.01;
+              warpParticles.rotation.y += targetHandPosition.x * 0.01;
             }
           }
         }
       }
 
-      startButton.addEventListener('click', handleStart);
+      function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.style.display = 'block';
+      }
+
+      function handleError(error) {
+        console.error('An error occurred:', error);
+        showError(error.message);
+      }
+
+      // Start button event listener
+      startButton.addEventListener('click', () => {
+        if (isStarted) return;
+        isStarted = true;
+        startButton.style.display = 'none';
+        initThreeJS();
+        try {
+          initializeMediaPipe();
+        } catch (error) {
+          handleError(error);
+        }
+      });
+
+      // Handle permission denial or camera issues
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          video.srcObject = stream;
+        })
+        .catch(err => {
+          handleError(new Error('Failed to access the camera. Please allow camera access and refresh the page.'));
+        });
     });
   </script>
 </body>
 </html>
-
